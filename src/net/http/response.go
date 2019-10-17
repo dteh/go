@@ -9,7 +9,6 @@ package http
 import (
 	"bufio"
 	"bytes"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 
+	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http/httpguts"
 )
 
@@ -118,7 +118,7 @@ type Response struct {
 	// response was received. It is nil for unencrypted responses.
 	// The pointer is shared between responses and should not be
 	// modified.
-	TLS *tls.ConnectionState
+	TLS *utls.ConnectionState
 }
 
 // Cookies parses and returns the cookies set in the Set-Cookie headers.

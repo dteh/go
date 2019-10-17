@@ -30,6 +30,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/brotli/go/cbrotli"
+	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http/httpguts"
 	"golang.org/x/net/http/httpproxy"
 )
@@ -262,6 +264,14 @@ type Transport struct {
 	// To use a custom dialer or TLS config and still attempt HTTP/2
 	// upgrades, set this to true.
 	ForceAttemptHTTP2 bool
+
+	//utls specific settings
+	fakeClientHello bool
+}
+
+// UseFakeClientHello sets whether transport should use a parroted ClientHello or the default golang one
+func (t *Transport) UseFakeClientHello(setting bool) {
+	t.fakeClientHello = setting
 }
 
 func (t *Transport) writeBufferSize() int {
@@ -1364,8 +1374,20 @@ func (pconn *persistConn) addTLS(name string, trace *httptrace.ClientTrace) erro
 	if pconn.cacheKey.onlyH1 {
 		cfg.NextProtos = nil
 	}
+	// XXX: stdlib tls connection (disabled)
 	plainConn := pconn.conn
-	tlsConn := tls.Client(plainConn, cfg)
+	// tlsConn := tls.Client(plainConn, cfg)
+
+	// insert UTLS config here
+
+	utlsConfig := utls.Config{ServerName: cfg.ServerName, InsecureSkipVerify: cfg.InsecureSkipVerify, KeyLogWriter: cfg.KeyLogWriter}
+	// tlsConn := utls.UClient(plainConn, &utlsConfig, utls.HelloFirefox_Auto)
+	clientHello := utls.HelloGolang
+	if pconn.t.fakeClientHello {
+		clientHello = utls.HelloChrome_Auto
+	}
+	tlsConn := utls.UClient(plainConn, &utlsConfig, clientHello)
+
 	errc := make(chan error, 2)
 	var timer *time.Timer // for canceling TLS handshake
 	if d := pconn.t.TLSHandshakeTimeout; d != 0 {
@@ -1391,9 +1413,11 @@ func (pconn *persistConn) addTLS(name string, trace *httptrace.ClientTrace) erro
 		return err
 	}
 	cs := tlsConn.ConnectionState()
-	if trace != nil && trace.TLSHandshakeDone != nil {
-		trace.TLSHandshakeDone(cs, nil)
-	}
+
+	// XXX: We disable the trace due to incompatible types
+	// if trace != nil && trace.TLSHandshakeDone != nil {
+	// 	trace.TLSHandshakeDone(cs, nil)
+	// }
 	pconn.tlsState = &cs
 	pconn.conn = tlsConn
 	return nil
@@ -1426,7 +1450,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 		if pconn.conn == nil {
 			return nil, wrapErr(errors.New("net/http: Transport.DialTLS returned (nil, nil)"))
 		}
-		if tc, ok := pconn.conn.(*tls.Conn); ok {
+		if tc, ok := pconn.conn.(*utls.Conn); ok {
 			// Handshake here, in case DialTLS didn't. TLSNextProto below
 			// depends on it for knowing the connection state.
 			if trace != nil && trace.TLSHandshakeStart != nil {
@@ -1440,9 +1464,10 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 				return nil, err
 			}
 			cs := tc.ConnectionState()
-			if trace != nil && trace.TLSHandshakeDone != nil {
-				trace.TLSHandshakeDone(cs, nil)
-			}
+			// XXX: We disable trace here due to incompatible types (utls) - fix trace to manage utls
+			// if trace != nil && trace.TLSHandshakeDone != nil {
+			// 	trace.TLSHandshakeDone(cs, nil)
+			// }
 			pconn.tlsState = &cs
 		}
 	} else {
@@ -1672,7 +1697,7 @@ type persistConn struct {
 	t         *Transport
 	cacheKey  connectMethodKey
 	conn      net.Conn
-	tlsState  *tls.ConnectionState
+	tlsState  *utls.ConnectionState
 	br        *bufio.Reader       // from conn
 	bw        *bufio.Writer       // to conn
 	nwrite    int64               // bytes written
@@ -1982,6 +2007,13 @@ func (pc *persistConn) readLoop() {
 			resp.Header.Del("Content-Encoding")
 			resp.Header.Del("Content-Length")
 			resp.ContentLength = -1
+			resp.Uncompressed = true
+		} else if rc.addedGzip && strings.EqualFold(resp.Header.Get("Content-Encoding"), "br") {
+			//XXX: Added brotli decompression
+			resp.Header.Del("Content-Encoding")
+			resp.Header.Del("Content-Length")
+			resp.ContentLength = -1
+			resp.Body = &brotliReader{body: resp.Body}
 			resp.Uncompressed = true
 		}
 
@@ -2349,7 +2381,10 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 		// auto-decoding a portion of a gzipped document will just fail
 		// anyway. See https://golang.org/issue/8923
 		requestedGzip = true
-		req.extraHeaders().Set("Accept-Encoding", "gzip")
+		// XXX: Change default accept-encoding to include brotli
+		// we also move this header from extra headers to regular headers
+		// so that header ordering applies
+		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	}
 
 	var continueCh chan struct{}
@@ -2612,6 +2647,34 @@ func (gz *gzipReader) Read(p []byte) (n int, err error) {
 
 func (gz *gzipReader) Close() error {
 	return gz.body.Close()
+}
+
+type brotliReader struct {
+	body io.ReadCloser
+	zr   *cbrotli.Reader
+	zerr error
+}
+
+func (gz *brotliReader) Read(p []byte) (n int, err error) {
+	if gz.zerr != nil {
+		return 0, gz.zerr
+	}
+	if gz.zr == nil {
+		gz.zr = cbrotli.NewReader(gz.body)
+		// if err != nil {
+		// 	gz.zerr = err
+		// 	return 0, err
+		// }
+	}
+	return gz.zr.Read(p)
+}
+
+func (gz *brotliReader) Close() error {
+	gz.body.Close()
+	if gz.zr != nil {
+		return gz.zr.Close()
+	}
+	return nil
 }
 
 type tlsHandshakeTimeoutError struct{}

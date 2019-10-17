@@ -7141,9 +7141,11 @@ func (t *http2Transport) newClientConn(c net.Conn, singleUse bool) (*http2Client
 		cc.nextStreamID = 3
 	}
 
-	if cs, ok := c.(http2connectionStater); ok {
-		state := cs.ConnectionState()
-		cc.tlsState = &state
+	if _, ok := c.(http2connectionStater); ok {
+		// XXX: Disable this because UTLS is incompatible with this as well.
+		// if cs, ok := c.(http2connectionStater); ok {
+		// state := cs.ConnectionState()
+		// cc.tlsState = &state
 	}
 
 	initialSettings := []http2Setting{
@@ -7569,7 +7571,9 @@ func (cc *http2ClientConn) roundTrip(req *Request) (res *Response, gotErrAfterRe
 			return nil, cs.getStartedWrite(), re.err
 		}
 		res.Request = req
-		res.TLS = cc.tlsState
+		// XXX: We temporarily disable this as a quick hack to get go to compile.
+		// TODO: This should break http2 functionality until we properly implement http2 compat
+		// res.TLS = cc.tlsState
 		return res, false, nil
 	}
 

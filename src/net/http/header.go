@@ -141,9 +141,34 @@ type headerSorter struct {
 	kvs []keyValues
 }
 
-func (s *headerSorter) Len() int           { return len(s.kvs) }
-func (s *headerSorter) Swap(i, j int)      { s.kvs[i], s.kvs[j] = s.kvs[j], s.kvs[i] }
-func (s *headerSorter) Less(i, j int) bool { return s.kvs[i].key < s.kvs[j].key }
+// XXX: Add in desired order which headers should be written
+// In the future this should be settable via API
+var priorityHeaders = []string{"connection", "content-length", "cache-control", "upgrade-insecure-requests", "user-agent", "sec-fetch-mode", "sec-fetch-user", "accept", "sec-fetch-site", "referer", "accept-encoding", "accept-language"}
+
+func headerSliceContains(target string, slice []string) (bool, int) {
+	for i, s := range slice {
+		if strings.ToLower(target) == s {
+			return true, i
+		}
+	}
+	return false, -1
+}
+
+// XXX: We override the sorting function to take priority headers into account first
+func (s *headerSorter) Len() int      { return len(s.kvs) }
+func (s *headerSorter) Swap(i, j int) { s.kvs[i], s.kvs[j] = s.kvs[j], s.kvs[i] }
+func (s *headerSorter) Less(i, j int) bool {
+	iExists, iPos := headerSliceContains(s.kvs[i].key, priorityHeaders)
+	jExists, jPos := headerSliceContains(s.kvs[j].key, priorityHeaders)
+	if iExists && jExists {
+		return iPos < jPos
+	} else if iExists && !jExists {
+		return true
+	} else if !iExists && jExists {
+		return false
+	}
+	return s.kvs[i].key < s.kvs[j].key
+}
 
 var headerSorterPool = sync.Pool{
 	New: func() interface{} { return new(headerSorter) },

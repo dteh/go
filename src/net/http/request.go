@@ -91,8 +91,9 @@ func (e *badStringError) Error() string { return fmt.Sprintf("%s %q", e.what, e.
 
 // Headers that Request.Write handles itself and should be skipped.
 var reqWriteExcludeHeader = map[string]bool{
-	"Host":              true, // not in Header map anyway
-	"User-Agent":        true,
+	"Host": true, // not in Header map anyway
+	// XXX: We disable the user-agent header here so that header order applies to it
+	// "User-Agent":        true,
 	"Content-Length":    true,
 	"Transfer-Encoding": true,
 	"Trailer":           true,
@@ -615,16 +616,20 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 	userAgent := defaultUserAgent
 	if r.Header.has("User-Agent") {
 		userAgent = r.Header.Get("User-Agent")
+	} else {
+		r.Header.Set("User-Agent", userAgent)
 	}
-	if userAgent != "" {
-		_, err = fmt.Fprintf(w, "User-Agent: %s\r\n", userAgent)
-		if err != nil {
-			return err
-		}
-		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField("User-Agent", []string{userAgent})
-		}
-	}
+
+	// XXX: We disable automatic UA writing so that header order applies
+	// if userAgent != "" {
+	// 	_, err = fmt.Fprintf(w, "User-Agent: %s\r\n", userAgent)
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// 	if trace != nil && trace.WroteHeaderField != nil {
+	// 		trace.WroteHeaderField("User-Agent", []string{userAgent})
+	// 	}
+	// }
 
 	// Process Body,ContentLength,Close,Trailer
 	tw, err := newTransferWriter(r)
